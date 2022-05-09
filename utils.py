@@ -1,130 +1,18 @@
 # -*- coding: utf-8 -*-
-import itertools
-import os
-
 import numpy as np
 import torch
-from tqdm import tqdm
 from transformers import BertTokenizer, BertModel, PegasusTokenizer, PegasusForConditionalGeneration, PegasusModel, \
     logging
 from options import args
 import scipy.sparse as sp
-import pickle as pkl
-import re
-
-
-class MultiNewsSummaryDataset:
-
-    @classmethod
-    def parse_source_data(cls, content):
-        # content_transform = re.sub('(\$.*?M\s)|(#.*?\s)|(\|\|\|\|\|)|(\d+\.\d+%\s?)|(\d+\.\d+\s?)', '', content)
-        content_transform = re.sub('\|\|\|\|\||NEWLINE_CHAR', '', content)
-        sentence_split_list = cls.sentence_split_en(content_transform)
-        mark, feature_list = cls.pre_train(sentence_split_list)
-        assert len(sentence_split_list) == len(feature_list), (len(sentence_split_list),len(feature_list))
-        if len(mark) != 0:
-            sentence_split_list = [sentence_split_list[i] for i in range(len(sentence_split_list)) if (i not in mark)]
-        l = len(feature_list)
-        adj = np.zeros((l, l))
-        src_index = range(l)
-        index_combinations = list(itertools.combinations(src_index, 2))
-        for i, j in index_combinations:
-            cos_sim = torch.cosine_similarity(torch.Tensor(feature_list[i]), torch.Tensor(feature_list[j]), dim=0)
-            if cos_sim >= args.sim_threshold:
-                adj[i][j] = cos_sim.numpy()
-        adj = sp.csr_matrix(adj)
-        return sentence_split_list, feature_list, adj
-
-    @classmethod
-    def pre_train(cls, sent_list):
-        feature_list = []
-        if args.pre_train_model == 'BERT':
-            pre_model = BertFeature()
-        elif args.pre_train_model == 'PEGASUS':
-            pre_model = PegasusFeature()
-        else:
-            assert "Undefined pre-training model"
-        mark_unused_sen = -1
-        unused_sen = []
-        for sen in sent_list:
-            mark_unused_sen += 1
-            try:
-                feature = pre_model.transform(sen)
-                feature_list.append(feature)
-            except:
-                unused_sen.append(mark_unused_sen)
-                print(sen)
-                continue
-        return unused_sen, feature_list
-
-    @staticmethod
-    def sentence_split_en(str_sentence):
-        list_ret = list()
-        for s_str in str_sentence.split('. '):
-            if '? ' in s_str:
-                list_ret.extend(s_str.split('? '))
-            elif '! ' in s_str:
-                list_ret.extend(s_str.split('! '))
-            else:
-                list_ret.append(s_str)
-        # for s_str in list_ret:
-        #     space = s_str.count(" ")
-        #     if space > 509:
-        #         # list_final.append(' '.join(s_str.split(' ')[:100]))
-        #         continue
-        #     if space > 5:
-        #         list_final.append(s_str.strip())
-        # 过滤短句
-        list_ret = [x.strip() for x in list_ret if x.count(" ") > 5]
-        return list_ret
-
-    @classmethod
-    def load_data(cls, data_path, mode="train"):
-        """
-        mode : {"train", "val", "test"}
-        """
-        source_data_path = os.path.join(data_path, "{}.src".format(mode))
-        target_data_path = os.path.join(data_path, "{}.tgt".format(mode))
-        source_data = []
-        source_data_feature = []
-        graph = []
-        target_data = []
-        source_pro_path = "./res/{}_{}_sen.pkl".format(args.pre_train_model, mode)
-        feature_path = "./res/{}_{}_feat.pkl".format(args.pre_train_model, mode)
-        graph_path = "./res/{}_{}_graph.pkl".format(args.pre_train_model, mode)
-        count = 0
-        if os.path.exists(feature_path):
-            source_data = pkl.load(open(source_pro_path, "rb"))
-            source_data_feature = pkl.load(open(feature_path, "rb"))
-            graph = pkl.load(open(graph_path, "rb"))
-        else:
-            with open(source_data_path, encoding='UTF-8') as f_src:
-                for lines in tqdm(f_src.readlines()):
-                    src, feat, adj = cls.parse_source_data(lines)
-                    source_data.append(src)
-                    source_data_feature.append(feat)
-                    graph.append(adj)
-                    count += 1
-                    if count > 100:
-                        break
-                with open(source_pro_path, 'wb') as f:
-                    pkl.dump(source_data, f)
-                with open(graph_path, 'wb') as f:
-                    pkl.dump(graph, f)
-                with open(feature_path, 'wb') as f_features:
-                    pkl.dump(source_data_feature, f_features)
-        with open(target_data_path, encoding='UTF-8') as f_tgt:
-            for line in f_tgt.readlines():
-                target_data.append(line.strip())
-        return source_data_feature, source_data, graph, target_data
+logging.set_verbosity_error()
 
 
 class BertFeature:
-
     def __init__(self):
         self.device = args.device
-        self.tokenizer = BertTokenizer.from_pretrained(args.BERT_EN)
-        self.model = BertModel.from_pretrained(args.BERT_EN).to(self.device)
+        self.tokenizer = BertTokenizer.from_pretrained(args.bert_ch)
+        self.model = BertModel.from_pretrained(args.bert_ch).to(self.device)
 
     def transform(self, texts):
         inputs = self.tokenizer(texts, padding=True, return_tensors="pt").to(self.device)
@@ -167,6 +55,15 @@ def preprocess_graph(adj):
     return sparse_mx_to_torch_sparse_tensor(adj_normalized)
 
 
+def load_graph_param(adj):
+    adj_norm = preprocess_graph(adj)
+    pos_weight = torch.Tensor([float(adj.shape[0] * adj.shape[0] - adj.sum()) / adj.sum()])
+    norm = adj.shape[0] * adj.shape[0] / float((adj.shape[0] * adj.shape[0] - adj.sum()) * 2)
+    adj_label = adj + sp.eye(adj.shape[0])
+    adj_label = torch.FloatTensor(adj_label.toarray())
+    return adj_norm, pos_weight, norm, adj_label
+
+
 def sparse_mx_to_torch_sparse_tensor(sparse_mx):
     """Convert a scipy sparse matrix to a torch sparse tensor."""
     sparse_mx = sparse_mx.tocoo().astype(np.float32)
@@ -175,14 +72,3 @@ def sparse_mx_to_torch_sparse_tensor(sparse_mx):
     values = torch.from_numpy(sparse_mx.data)
     shape = torch.Size(sparse_mx.shape)
     return torch.sparse.FloatTensor(indices, values, shape)
-
-
-def load_graph(datasets):
-    # bert特征，句子文本，邻接矩阵，标签句子
-    feat, src, graph, tgt = MultiNewsSummaryDataset.load_data(datasets, mode="test")
-    return feat, src, graph, tgt
-
-
-if __name__ == "__main__":
-    logging.set_verbosity_error()
-    load_graph()

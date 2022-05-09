@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import torch.nn as nn
 
 
-def gae_loss_function(preds, labels, mu, logvar, n_nodes, norm, pos_weight):
+def graph_loss_function(preds, labels, mu, logvar, n_nodes, norm, pos_weight):
     cost = norm * F.binary_cross_entropy_with_logits(preds, labels, pos_weight=pos_weight)
 
     # see Appendix B from VAE paper:

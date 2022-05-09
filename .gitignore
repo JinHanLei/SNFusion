@@ -1,2 +1,6 @@
 *.[oa]
 *~
+data/*
+ckpts/*
+res/*
+test.py

@@ -1,10 +1,11 @@
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.autograd import Variable
 import torch.nn.functional as F
 from sklearn.cluster import KMeans
-
-from jlearn.gae.layers import GraphConvolution
+from layers import GraphAttentionLayer, SpGraphAttentionLayer
+from layers import GraphConvolution
 
 
 class GCNModelVAE(nn.Module):
@@ -35,7 +36,6 @@ class GCNModelVAE(nn.Module):
 
 class InnerProductDecoder(nn.Module):
     """Decoder for using inner product for prediction."""
-
     def __init__(self, dropout, act=torch.sigmoid):
         super(InnerProductDecoder, self).__init__()
         self.dropout = dropout
@@ -47,8 +47,55 @@ class InnerProductDecoder(nn.Module):
         return adj
 
 
-class KMeansModel(nn.Module):
+class GAT(nn.Module):
+    def __init__(self, nfeat, nhid, nclass, dropout, alpha, nheads):
+        """Dense version of GAT."""
+        super(GAT, self).__init__()
+        self.dropout = dropout
 
+        self.attentions = [GraphAttentionLayer(nfeat, nhid, dropout=dropout, alpha=alpha, concat=True) for _ in range(nheads)]
+        for i, attention in enumerate(self.attentions):
+            self.add_module('attention_{}'.format(i), attention)
+
+        self.out_att = GraphAttentionLayer(nhid * nheads, nclass, dropout=dropout, alpha=alpha, concat=False)
+
+    def forward(self, x, adj):
+        x = F.dropout(x, self.dropout, training=self.training)
+        x = torch.cat([att(x, adj) for att in self.attentions], dim=1)
+        x = F.dropout(x, self.dropout, training=self.training)
+        x = F.elu(self.out_att(x, adj))
+        return F.log_softmax(x, dim=1)
+
+
+class SpGAT(nn.Module):
+    def __init__(self, nfeat, nhid, nclass, dropout, alpha, nheads):
+        """Sparse version of GAT."""
+        super(SpGAT, self).__init__()
+        self.dropout = dropout
+
+        self.attentions = [SpGraphAttentionLayer(nfeat,
+                                                 nhid,
+                                                 dropout=dropout,
+                                                 alpha=alpha,
+                                                 concat=True) for _ in range(nheads)]
+        for i, attention in enumerate(self.attentions):
+            self.add_module('attention_{}'.format(i), attention)
+
+        self.out_att = SpGraphAttentionLayer(nhid * nheads,
+                                             nclass,
+                                             dropout=dropout,
+                                             alpha=alpha,
+                                             concat=False)
+
+    def forward(self, x, adj):
+        x = F.dropout(x, self.dropout, training=self.training)
+        x = torch.cat([att(x, adj) for att in self.attentions], dim=1)
+        x = F.dropout(x, self.dropout, training=self.training)
+        x = F.elu(self.out_att(x, adj))
+        return F.log_softmax(x, dim=1)
+
+
+class KMeansModel(nn.Module):
     def __init__(self, n_clusters=10, random_state=666):
         super(KMeansModel, self).__init__()
         self.n_clusters = n_clusters
@@ -61,11 +108,10 @@ class KMeansModel(nn.Module):
         labels = k_means.labels_
         # 簇内距离之和
         # inertia = k_means.inertia_
-        sentence_index = []
-        sentence_feat = []
+        sentence_index, sentence_feat = [], []
         for i, center in enumerate(cluster_centers):
             euc_distance = []
-            for j, (f, label) in enumerate(zip(feature, labels)):
+            for j, f, label in enumerate(zip(feature, labels)):
                 if label == i:
                     euc_distance.append([j, np.linalg.norm(center - f), f])
             euc_distance = sorted(euc_distance, key=lambda x: x[1])
@@ -73,8 +119,36 @@ class KMeansModel(nn.Module):
             sentence_feat.append(euc_distance[0][2])
         cluster_centers = torch.FloatTensor(cluster_centers)
         sentence_feat = torch.FloatTensor(sentence_feat)
-        # for i, f in enumerate(feature):
-        #     for center in cluster_centers:
-        #         if np.array_equal(center, np.array(f)):
-        #             sentence_index.append(i)
         return cluster_centers, sentence_feat, sentence_index
+
+
+class GRU(nn.Module):
+    def __init__(self, input_size, output_size, num_classes=2, classification=False):
+        super(GRU, self).__init__()
+        self.hidden_size = output_size
+        self.cell_size = output_size
+        self.tanh = nn.Tanh()
+        self.sigmoid = nn.Sigmoid()
+        self.gate = nn.Linear(input_size + output_size, output_size)
+        self.classification = classification
+        if self.classification:
+            self.output_dense = nn.Linear(output_size, num_classes)
+
+    def forward(self, input, h_t):
+        combined = torch.cat((input, h_t), 1)
+
+        z = self.sigmoid(self.gate(combined))
+        r = self.sigmoid(self.gate(combined))
+        h_m = self.tanh(self.gate(torch.cat((input, torch.mul(r, h_t)), 1)))
+        h = torch.add(torch.mul(z, h_m), torch.mul(1 - z, h_t))
+
+        if self.classification:
+            output = self.output_dense(h)
+        else:
+            output = h
+        return output, h
+
+    def init_hidden(self):
+        return Variable(torch.zeros(1, self.hidden_size))
+
+
