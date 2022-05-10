@@ -4,8 +4,9 @@ import torch.nn as nn
 from torch.autograd import Variable
 import torch.nn.functional as F
 from sklearn.cluster import KMeans
-from layers import GraphAttentionLayer, SpGraphAttentionLayer
+from layers import GraphAttentionLayer, AttentionLayer
 from layers import GraphConvolution
+# from torch.nn import GRU
 
 
 class GCNModelVAE(nn.Module):
@@ -67,32 +68,17 @@ class GAT(nn.Module):
         return F.log_softmax(x, dim=1)
 
 
-class SpGAT(nn.Module):
-    def __init__(self, nfeat, nhid, nclass, dropout, alpha, nheads):
-        """Sparse version of GAT."""
-        super(SpGAT, self).__init__()
-        self.dropout = dropout
+class MultiHeadAttention(nn.Module):
+    def __init__(self, nheads, in_news_dim, in_stock_dim, out_dim, dropout, alpha):
+        super(MultiHeadAttention, self).__init__()
+        self.attention = [AttentionLayer(in_news_dim, in_stock_dim, out_dim, dropout, alpha) for _ in range(nheads)]
+        self.fc = nn.Linear(out_dim * nheads, out_dim)
 
-        self.attentions = [SpGraphAttentionLayer(nfeat,
-                                                 nhid,
-                                                 dropout=dropout,
-                                                 alpha=alpha,
-                                                 concat=True) for _ in range(nheads)]
-        for i, attention in enumerate(self.attentions):
-            self.add_module('attention_{}'.format(i), attention)
-
-        self.out_att = SpGraphAttentionLayer(nhid * nheads,
-                                             nclass,
-                                             dropout=dropout,
-                                             alpha=alpha,
-                                             concat=False)
-
-    def forward(self, x, adj):
-        x = F.dropout(x, self.dropout, training=self.training)
-        x = torch.cat([att(x, adj) for att in self.attentions], dim=1)
-        x = F.dropout(x, self.dropout, training=self.training)
-        x = F.elu(self.out_att(x, adj))
-        return F.log_softmax(x, dim=1)
+    def forward(self, news, stock):
+        # n_clusters * (out_dim * heads)
+        output = torch.cat([atte(news, stock) for atte in self.attention], dim=1).squeeze(0)
+        output = F.softmax(self.fc(output), dim=1).mean(dim=0).unsqueeze(0)
+        return output
 
 
 class KMeansModel(nn.Module):
@@ -111,7 +97,7 @@ class KMeansModel(nn.Module):
         sentence_index, sentence_feat = [], []
         for i, center in enumerate(cluster_centers):
             euc_distance = []
-            for j, f, label in enumerate(zip(feature, labels)):
+            for j, (f, label) in enumerate(zip(feature, labels)):
                 if label == i:
                     euc_distance.append([j, np.linalg.norm(center - f), f])
             euc_distance = sorted(euc_distance, key=lambda x: x[1])
@@ -123,32 +109,41 @@ class KMeansModel(nn.Module):
 
 
 class GRU(nn.Module):
-    def __init__(self, input_size, output_size, num_classes=2, classification=False):
+    r"""math::
+        \begin{array}{ll}
+            r_t = \sigma(W_{ir} x_t + b_{ir} + W_{hr} h_{(t-1)} + b_{hr}) \\
+            z_t = \sigma(W_{iz} x_t + b_{iz} + W_{hz} h_{(t-1)} + b_{hz}) \\
+            n_t = \tanh(W_{in} x_t + b_{in} + r_t * (W_{hn} h_{(t-1)}+ b_{hn})) \\
+            h_t = (1 - z_t) * n_t + z_t * h_{(t-1)}
+        \end{array}"""
+    def __init__(self, input_size, output_size):
         super(GRU, self).__init__()
         self.hidden_size = output_size
         self.cell_size = output_size
         self.tanh = nn.Tanh()
         self.sigmoid = nn.Sigmoid()
         self.gate = nn.Linear(input_size + output_size, output_size)
-        self.classification = classification
-        if self.classification:
-            self.output_dense = nn.Linear(output_size, num_classes)
 
-    def forward(self, input, h_t):
-        combined = torch.cat((input, h_t), 1)
-
+    def forward(self, stock, h_t):
+        combined = torch.cat((stock, h_t), 1)
         z = self.sigmoid(self.gate(combined))
         r = self.sigmoid(self.gate(combined))
-        h_m = self.tanh(self.gate(torch.cat((input, torch.mul(r, h_t)), 1)))
-        h = torch.add(torch.mul(z, h_m), torch.mul(1 - z, h_t))
-
-        if self.classification:
-            output = self.output_dense(h)
-        else:
-            output = h
-        return output, h
+        h = self.tanh(self.gate(torch.cat((stock, torch.mul(r, h_t)), 1)))
+        h = torch.add(torch.mul(z, h), torch.mul(1 - z, h_t))
+        return h
 
     def init_hidden(self):
         return Variable(torch.zeros(1, self.hidden_size))
 
 
+class FusionModel(nn.Module):
+    def __init__(self, text_dim, stock_dim, hidden1, hidden2, n_clusters, gru_dim, n_heads, n_nodes, output_size, dropout, alpha):
+        super(FusionModel, self).__init__()
+        self.gae_model = GCNModelVAE(text_dim, hidden1, hidden2, dropout)
+        self.k_means_model = KMeansModel(n_clusters)
+        self.gru_model = GRU(stock_dim, gru_dim)
+        self.attention = MultiHeadAttention(n_heads, n_nodes, gru_dim, output_size, dropout, alpha)
+
+    def forward(self, stock, h_t):
+
+        return h
