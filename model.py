@@ -145,5 +145,8 @@ class FusionModel(nn.Module):
         self.attention = MultiHeadAttention(n_heads, n_nodes, gru_dim, output_size, dropout, alpha)
 
     def forward(self, stock, h_t):
-
+        stock_feat = self.gru_model.init_hidden()
+        for stock_daily in stock:
+            stock_daily = torch.FloatTensor([stock_daily])
+            stock_feat = self.gru_model(stock_daily, stock_feat)
         return h
