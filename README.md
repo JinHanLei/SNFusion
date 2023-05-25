@@ -1,6 +1,6 @@
-# FirmAsGraph
+# SNFusion
 
-This is a Pytorch implementation of the FirmAsGraph model as described in our paper
+This is a Pytorch implementation of the SNFusion model as described in our paper
 
 ## Run the demo
 
